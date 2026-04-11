@@ -1,0 +1,15 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Debug Yafc",
+      "type": "coreclr",
+      "request": "launch",
+      "preLaunchTask": "build yafc",
+      "program": "${workspaceFolder}/Yafc/bin/Debug/net8.0/Yafc.exe",
+      "cwd": "${workspaceFolder}/Yafc/bin/Debug/net8.0",
+      "stopAtEntry": false,
+      "console": "internalConsole"
+    }
+  ]
+}
