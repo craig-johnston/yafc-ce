@@ -1048,7 +1048,10 @@ internal partial class FactorioDataDeserializer {
                     continue;
                 }
 
-                bool isFullCategory = acceptedSubset.Count == categoryFuelList.Count && acceptedSubset.SequenceEqual(categoryFuelList);
+                // Compare as sets so differing list order does not create duplicate subset groups
+                // for what is actually the full category.
+                bool isFullCategory = acceptedSubset.Count == categoryFuelList.Count
+                    && acceptedSubset.All(categoryFuelList.Contains);
                 string groupKey = isFullCategory
                     ? categoryKey
                     : categoryKey + "|subset|" + string.Join("|", acceptedSubset.Select(f => f.typeDotName));
