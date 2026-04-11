@@ -95,9 +95,9 @@ public class Preferences {
     /// </summary>
     public bool useMostRecentSave { get; set; } = true;
 
-    public void AddProject(string dataPath, string modsPath, string projectPath, bool expensive, bool netProduction) {
+    public void AddProject(string dataPath, string modsPath, string projectPath, bool expensive, bool netProduction, bool useFuelGroups) {
         recentProjects = [.. recentProjects.Where(x => string.Compare(projectPath, x.path, StringComparison.InvariantCultureIgnoreCase) != 0)
-            .Prepend(new ProjectDefinition(dataPath, modsPath, projectPath, expensive, netProduction))];
+            .Prepend(new ProjectDefinition(dataPath, modsPath, projectPath, expensive, netProduction, useFuelGroups))];
         Save();
     }
 }
@@ -117,12 +117,13 @@ public class ProjectDefinition {
         netProduction = false;
     }
 
-    public ProjectDefinition(string dataPath, string modsPath, string path, bool expensive, bool netProduction) {
+    public ProjectDefinition(string dataPath, string modsPath, string path, bool expensive, bool netProduction, bool useFuelGroups) {
         this.dataPath = dataPath;
         this.modsPath = modsPath;
         this.path = path;
         this.expensive = expensive;
         this.netProduction = netProduction;
+        this.useFuelGroups = useFuelGroups;
     }
 
     /// <summary>
@@ -148,4 +149,9 @@ public class ProjectDefinition {
     /// but will appear as only producing U-235 and consuming U-238 when <see langword="true"/>.
     /// </summary>
     public bool netProduction { get; set; }
+
+    /// <summary>
+    /// If <see langword="true"/>, YAFC will create synthetic fuel groups and conversion recipes for fuel categories.
+    /// </summary>
+    public bool useFuelGroups { get; set; }
 }

@@ -130,20 +130,47 @@ public class CostAnalysis(bool onlyCurrentMilestones) : Analysis {
                 continue;
             }
 
-            // TODO incorporate fuel selection. Now just select fuel if it only uses 1 fuel
+            bool isFuelGroupConversion = recipe is Mechanics && recipe.name.StartsWith("fuel-group-recipe.", StringComparison.Ordinal);
+
+            static bool ExcludeFuelFromCost(Goods fuel)
+                => fuel is Fluid fluid && fluid.originalName == "steam"
+                    || fuel is Special special && (special.name == "heat" || special.name.StartsWith("heat@", StringComparison.Ordinal));
+
             Goods? singleUsedFuel = null;
             float singleUsedFuelAmount = 0f;
-            float minEmissions = 100f;
-            int minSize = 15;
-            float minPower = 1000f;
+            float bestFuelUsage = float.PositiveInfinity;
+            float minEmissions = float.PositiveInfinity;
+            int minSize = int.MaxValue;
+            float minPower = float.PositiveInfinity;
+            float minRecipeTime = float.PositiveInfinity;
+            float maxProductivity = 0f;
 
-            foreach (var crafter in recipe.crafters) {
-                foreach ((_, float e) in crafter.energy.emissions) {
-                    minEmissions = MathF.Min(e, minEmissions);
+            Bits recipeUnlockOrder = DataUtils.GetMilestoneOrder(recipe.id);
+            List<EntityCrafter> candidateCrafters = [.. recipe.crafters.Where(c => ShouldInclude(c)
+                && DataUtils.GetMilestoneOrder(c.id).CompareTo(recipeUnlockOrder) <= 0)];
+            if (candidateCrafters.Count == 0) {
+                // Fallback: if no crafter is available by the exact unlock step, use any included crafter.
+                candidateCrafters = [.. recipe.crafters.Where(ShouldInclude)];
+            }
+
+            foreach (var crafter in candidateCrafters) {
+                ModuleEffects moduleEffects = default;
+                if (TryGetAutoModuleEffects(project, recipe, crafter, out ModuleEffects configuredEffects)) {
+                    moduleEffects = configuredEffects;
                 }
 
-                if (crafter.energy.type == EntityEnergyType.Heat) {
-                    break;
+                float productivity = moduleEffects.productivity;
+                if (recipe.maximumProductivity is float maxRecipeProd && productivity > maxRecipeProd) {
+                    productivity = maxRecipeProd;
+                }
+                maxProductivity = MathF.Max(maxProductivity, productivity);
+
+                float recipeTime = recipe.time / crafter.baseCraftingSpeed;
+                recipeTime /= moduleEffects.speedMod;
+                minRecipeTime = MathF.Min(minRecipeTime, recipeTime);
+
+                foreach ((_, float e) in crafter.energy.emissions) {
+                    minEmissions = MathF.Min(e, minEmissions);
                 }
 
                 if (crafter.size < minSize) {
@@ -151,46 +178,49 @@ public class CostAnalysis(bool onlyCurrentMilestones) : Analysis {
                 }
 
                 float power = crafter.energy.type == EntityEnergyType.Void ? 0f : recipe.time * crafter.basePower / (crafter.baseCraftingSpeed * crafter.energy.effectivity);
+                power *= moduleEffects.energyUsageMod / moduleEffects.speedMod;
+                minPower = MathF.Min(minPower, power);
 
-                if (power < minPower) {
-                    minPower = power;
+                // Fuel contribution applies only to non-heat crafters that have non-steam, non-heat fuels.
+                if (crafter.energy.type is EntityEnergyType.Heat or EntityEnergyType.FluidHeat) {
+                    continue;
                 }
 
-                foreach (var fuel in crafter.energy.fuels) {
-                    if (!ShouldInclude(fuel)) {
-                        continue;
-                    }
+                Goods? selectedFuel = crafter.energy.fuels
+                    .Where(f => ShouldInclude(f) && !f.isPower && f.fuelValue > 0f && !ExcludeFuelFromCost(f))
+                    .OrderBy(f => f, DataUtils.DeterministicComparer)
+                    .FirstOrDefault();
 
-                    if (fuel.fuelValue <= 0f) {
-                        singleUsedFuel = null;
-                        break;
-                    }
-
-                    float amount = power / fuel.fuelValue;
-
-                    if (singleUsedFuel == null) {
-                        singleUsedFuel = fuel;
-                        singleUsedFuelAmount = amount;
-                    }
-                    else if (singleUsedFuel == fuel) {
-                        singleUsedFuelAmount = MathF.Min(singleUsedFuelAmount, amount);
-                    }
-                    else {
-                        singleUsedFuel = null;
-                        break;
-                    }
+                if (selectedFuel == null) {
+                    continue;
                 }
-                if (singleUsedFuel == null) {
-                    break;
+
+                float amount = power / selectedFuel.fuelValue;
+                if (amount < bestFuelUsage) {
+                    bestFuelUsage = amount;
+                    singleUsedFuel = selectedFuel;
+                    singleUsedFuelAmount = amount;
                 }
             }
 
-            if (minPower < 0f) {
+            if (!float.IsFinite(minPower) || minPower < 0f) {
                 minPower = 0f;
             }
 
+            if (!float.IsFinite(minRecipeTime) || minRecipeTime < 0f) {
+                minRecipeTime = recipe.time;
+            }
+
+            if (!float.IsFinite(minEmissions)) {
+                minEmissions = -1f;
+            }
+
+            if (minSize == int.MaxValue) {
+                minSize = 15;
+            }
+
             int size = Math.Max(minSize, (recipe.ingredients.Length + recipe.products.Length) / 2);
-            float sizeUsage = CostPerSecond * recipe.time * size;
+            float sizeUsage = CostPerSecond * minRecipeTime * size;
             float logisticsCost = (sizeUsage * (1f + (CostPerIngredientPerSize * recipe.ingredients.Length) + (CostPerProductPerSize * recipe.products.Length))) + (CostPerMj * minPower);
 
             // Special handling for spoilage recipes: cost depends on container efficiency and stack size
@@ -199,7 +229,7 @@ public class CostAnalysis(bool onlyCurrentMilestones) : Analysis {
                 int stackSize = spoilingItem.stackSize;
                 // Cost is based on storage space needed: time / (stackSize * slotsPerTile)
                 // This reflects that larger stacks and better containers reduce infrastructure cost
-                logisticsCost = CostPerSecond * recipe.time / (stackSize * bestContainerSlotsPerTile);
+                logisticsCost = CostPerSecond * minRecipeTime / (stackSize * bestContainerSlotsPerTile);
             }
 
             if (singleUsedFuel?.isPower == true) {
@@ -211,7 +241,7 @@ public class CostAnalysis(bool onlyCurrentMilestones) : Analysis {
 
             foreach (var product in recipe.products) {
                 var var = variables[product.goods];
-                float amount = product.amount;
+                float amount = product.GetAmountPerRecipe(maxProductivity);
                 constraint.SetCoefficientCheck(var, amount, ref lastVariable[product.goods]);
 
                 if (product.goods is Item) {
@@ -258,7 +288,12 @@ public class CostAnalysis(bool onlyCurrentMilestones) : Analysis {
             }
 
             if (minEmissions >= 0f) {
-                logisticsCost += minEmissions * CostPerPollution * recipe.time * project.settings.PollutionCostModifier;
+                logisticsCost += minEmissions * CostPerPollution * minRecipeTime * project.settings.PollutionCostModifier;
+            }
+
+            if (isFuelGroupConversion) {
+                // Fuel-group conversions are normalization helpers, not real-world processing steps.
+                logisticsCost = 0f;
             }
 
             constraint.SetUb(logisticsCost);
@@ -368,6 +403,50 @@ public class CostAnalysis(bool onlyCurrentMilestones) : Analysis {
         cost = export;
         recipeProductCost = recipeProductionCost;
 
+        // Update fuel group item icons to show the most cost-efficient (lowest cost per MJ) fuel.
+        // Only run once (not for the "at current milestones" variant) to avoid redundant updates.
+        if (!onlyCurrentMilestones && DataUtils.useFuelGroups) {
+            var bestFuelForGroup = new Dictionary<Goods, (Goods fuel, float costPerMj)>();
+
+            foreach (var recipe in Database.recipes.all) {
+                if (!recipe.name.StartsWith("fuel-group-recipe.", StringComparison.Ordinal)) {
+                    continue;
+                }
+
+                if (recipe.ingredients.Length != 1 || recipe.products.Length != 1) {
+                    continue;
+                }
+
+                Goods fuel = recipe.ingredients[0].goods;
+                Goods groupItem = recipe.products[0].goods;
+                float costPerMj = fuel.fuelValue > 0f ? cost[fuel] / fuel.fuelValue : float.PositiveInfinity;
+
+                if (!bestFuelForGroup.TryGetValue(groupItem, out var current) || costPerMj < current.costPerMj) {
+                    bestFuelForGroup[groupItem] = (fuel, costPerMj);
+                }
+            }
+
+            foreach (var (groupItem, (bestFuel, _)) in bestFuelForGroup) {
+                groupItem.icon = bestFuel.icon;
+            }
+
+            // Update conversion recipe icons to also show the best fuel's icon.
+            foreach (var recipe in Database.recipes.all) {
+                if (!recipe.name.StartsWith("fuel-group-recipe.", StringComparison.Ordinal)) {
+                    continue;
+                }
+
+                if (recipe.products.Length != 1) {
+                    continue;
+                }
+
+                Goods groupItem = recipe.products[0].goods;
+                if (bestFuelForGroup.TryGetValue(groupItem, out var best)) {
+                    recipe.icon = best.fuel.icon;
+                }
+            }
+        }
+
         recipeWastePercentage = Database.recipes.CreateMapping<float>();
         if (result is Solver.ResultStatus.OPTIMAL or Solver.ResultStatus.FEASIBLE) {
             foreach (var (recipe, constraint) in constraints) {
@@ -441,5 +520,143 @@ public class CostAnalysis(bool onlyCurrentMilestones) : Analysis {
         }
 
         return itemAmountPrefix + DataUtils.FormatAmount(itemFlow * 1000f, UnitOfMeasure.None);
+    }
+
+    private static bool TryGetAutoModuleEffects(Project project, Recipe recipe, EntityCrafter crafter, out ModuleEffects effects) {
+        foreach (ProjectModuleTemplate template in project.sharedModuleTemplates) {
+            if (TemplateMatches(template, recipe, crafter)) {
+                effects = GetTemplateEffects(template.template, recipe, crafter);
+                return true;
+            }
+        }
+
+        if (TryGetFallbackModule(recipe, crafter, out IObjectWithQuality<Module>? fallbackModule)) {
+            effects = default;
+            effects.AddModules(fallbackModule!, crafter.moduleSlots);
+            return true;
+        }
+
+        effects = default;
+        return false;
+    }
+
+    private static bool TemplateMatches(ProjectModuleTemplate projectTemplate, Recipe recipe, EntityCrafter crafter) {
+        if (!projectTemplate.autoApplyToNewRows || !projectTemplate.AcceptsEntity(crafter)) {
+            return false;
+        }
+
+        if (projectTemplate.autoApplyIfIncompatible) {
+            return true;
+        }
+
+        bool hasFloodfillModules = false;
+        bool hasCompatibleFloodfill = false;
+        int totalFixedModules = 0;
+
+        foreach (RecipeRowCustomModule module in projectTemplate.template.list) {
+            bool isCompatible = recipe.CanAcceptModule(module.module.target) && crafter.CanAcceptModule(module.module);
+
+            if (module.fixedCount == 0) {
+                hasFloodfillModules = true;
+                hasCompatibleFloodfill |= isCompatible;
+            }
+            else {
+                if (!isCompatible) {
+                    return false;
+                }
+
+                totalFixedModules += module.fixedCount;
+            }
+        }
+
+        return (!hasFloodfillModules || hasCompatibleFloodfill) && crafter.moduleSlots >= totalFixedModules;
+    }
+
+    private static ModuleEffects GetTemplateEffects(ModuleTemplate template, Recipe recipe, EntityCrafter crafter) {
+        ModuleEffects effects = default;
+        int remaining = crafter.moduleSlots;
+
+        foreach (RecipeRowCustomModule module in template.list) {
+            if (!crafter.CanAcceptModule(module.module) || !recipe.CanAcceptModule(module.module.target)) {
+                continue;
+            }
+
+            if (remaining <= 0) {
+                break;
+            }
+
+            int count = Math.Min(module.fixedCount == 0 ? int.MaxValue : module.fixedCount, remaining);
+            remaining -= count;
+            effects.AddModules(module.module, count);
+        }
+
+        if (template.beacon != null) {
+            int beaconCount = template.CalculateBeaconCount();
+            if (beaconCount > 0) {
+                float beaconEfficiency = template.beacon.GetBeaconEfficiency() * template.beacon.target.GetProfile(beaconCount);
+                foreach (RecipeRowCustomModule module in template.beaconList) {
+                    effects.AddModules(module.module, beaconEfficiency * module.fixedCount);
+                }
+            }
+        }
+
+        return effects;
+    }
+
+    private static bool TryGetFallbackModule(Recipe recipe, EntityCrafter crafter, out IObjectWithQuality<Module>? module) {
+        module = null;
+
+        if (crafter.allowedModuleCategories is not [string moduleCategory] || crafter.moduleSlots <= 0) {
+            return false;
+        }
+
+        Bits recipeUnlockOrder = DataUtils.GetMilestoneOrder(recipe.id);
+        Module? bestExactModule = null;
+        float bestExactSpeed = 0f;
+
+        Module? bestEarlierModule = null;
+        float bestEarlierSpeed = 0f;
+        Bits bestEarlierUnlockOrder = default;
+        bool hasEarlierModule = false;
+
+        foreach (Module candidate in Database.allModules) {
+            if (!string.Equals(candidate.moduleSpecification.category, moduleCategory, StringComparison.Ordinal)) {
+                continue;
+            }
+
+            if (!crafter.CanAcceptModule(candidate.moduleSpecification) || !recipe.CanAcceptModule(candidate)) {
+                continue;
+            }
+
+            Bits moduleUnlockOrder = DataUtils.GetMilestoneOrder(candidate.id);
+            if (moduleUnlockOrder.CompareTo(recipeUnlockOrder) > 0) {
+                continue;
+            }
+
+            float speed = candidate.moduleSpecification.Speed(Quality.Normal);
+            if (moduleUnlockOrder == recipeUnlockOrder) {
+                if (speed > bestExactSpeed) {
+                    bestExactModule = candidate;
+                    bestExactSpeed = speed;
+                }
+                continue;
+            }
+
+            if (!hasEarlierModule || moduleUnlockOrder.CompareTo(bestEarlierUnlockOrder) > 0
+                || (moduleUnlockOrder == bestEarlierUnlockOrder && speed > bestEarlierSpeed)) {
+                bestEarlierModule = candidate;
+                bestEarlierSpeed = speed;
+                bestEarlierUnlockOrder = moduleUnlockOrder;
+                hasEarlierModule = true;
+            }
+        }
+
+        Module? selected = bestExactModule ?? bestEarlierModule;
+        if (selected == null) {
+            return false;
+        }
+
+        module = selected.With(Quality.Normal);
+        return true;
     }
 }

@@ -52,6 +52,7 @@ public class WelcomeScreen : WindowUtility, IProgress<(string, string)>, IKeyboa
     }
     private bool expensive;
     private bool netProduction;
+    private bool useFuelGroups;
     private string createText;
     private bool canCreate;
     private readonly ScrollArea errorScroll;
@@ -267,6 +268,10 @@ public class WelcomeScreen : WindowUtility, IProgress<(string, string)>, IKeyboa
 
             using (gui.EnterRowWithHelpIcon(LSs.WelcomeUseNetProductionHint, false)) {
                 _ = gui.BuildCheckBox(LSs.WelcomeUseNetProduction, netProduction, out netProduction);
+            }
+
+            using (gui.EnterRowWithHelpIcon(LSs.WelcomeUseFuelGroupsHint, false)) {
+                _ = gui.BuildCheckBox(LSs.WelcomeUseFuelGroups, useFuelGroups, out useFuelGroups);
             }
 
             using (gui.EnterRowWithHelpIcon(LSs.WelcomeSoftwareRenderHint, false)) {
@@ -530,12 +535,14 @@ public class WelcomeScreen : WindowUtility, IProgress<(string, string)>, IKeyboa
             path = project.path;
             expensive = project.expensive;
             netProduction = project.netProduction;
+            useFuelGroups = project.useFuelGroups;
         }
         else {
             dataPath = "";
             modsPath = "";
             path = "";
             netProduction = false;
+            useFuelGroups = false;
         }
 
         if (dataPath == "" && RuntimeInformation.IsOSPlatform(OSPlatform.Windows)) {
@@ -555,7 +562,7 @@ public class WelcomeScreen : WindowUtility, IProgress<(string, string)>, IKeyboa
             // Why not take or copy the whole object? The parts are used only in WelcomeScreen.cs, so I see no reason
             // to disassemble ProjectDefinition and drag it piece by piece.
             var (dataPath, modsPath, projectPath) = (this.dataPath, this.modsPath, path);
-            Preferences.Instance.AddProject(dataPath, modsPath, projectPath, expensive, netProduction);
+            Preferences.Instance.AddProject(dataPath, modsPath, projectPath, expensive, netProduction, useFuelGroups);
             Preferences.Instance.Save();
             tip = tips.Length > 0 ? tips[DataUtils.random.Next(tips.Length)] : "";
 
@@ -565,7 +572,7 @@ public class WelcomeScreen : WindowUtility, IProgress<(string, string)>, IKeyboa
             await Ui.ExitMainThread();
 
             ErrorCollector collector = new ErrorCollector();
-            var project = FactorioDataSource.Parse(dataPath, modsPath, projectPath, expensive, netProduction, this, collector, Preferences.Instance.language, Preferences.Instance.useMostRecentSave);
+            var project = FactorioDataSource.Parse(dataPath, modsPath, projectPath, expensive, netProduction, useFuelGroups, this, collector, Preferences.Instance.language, Preferences.Instance.useMostRecentSave);
 
             await Ui.EnterMainThread();
             logger.Information("Opening main screen");

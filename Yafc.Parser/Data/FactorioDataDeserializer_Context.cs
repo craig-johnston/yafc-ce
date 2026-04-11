@@ -424,7 +424,7 @@ internal partial class FactorioDataDeserializer {
     /// If <see langword="false"/>, recipe selection windows will show all recipes that produce or consume any quantity of that <see cref="Goods"/>.<br/>
     /// For example, Kovarex enrichment will appear for both production and consumption of both U-235 and U-238 when <see langword="false"/>,
     /// but will appear as only producing U-235 and consuming U-238 when <see langword="true"/>.</param>
-    private void CalculateMaps(bool netProduction) {
+    private void CalculateMaps(bool netProduction, bool useFuelGroups) {
         DataBucket<Goods, Recipe> itemUsages = new DataBucket<Goods, Recipe>();
         DataBucket<Goods, Recipe> itemProduction = new DataBucket<Goods, Recipe>();
         DataBucket<Goods, FactorioObject> miscSources = new DataBucket<Goods, FactorioObject>();
@@ -555,6 +555,11 @@ internal partial class FactorioDataDeserializer {
 
         voidEntityEnergy.fuels = [voidEnergy];
 
+        if (useFuelGroups) {
+            // Create fuel group items and recipes for each fuel category
+            CreateFuelGroups(fuelUsers, actualRecipeCrafters, itemUsages, itemProduction, allRecipes, allMechanics);
+        }
+
         actualRecipeCrafters.Seal();
         usageAsFuel.Seal();
         recipeUnlockers.Seal();
@@ -659,6 +664,11 @@ internal partial class FactorioDataDeserializer {
         }
 
         foreach (var mechanic in allMechanics) {
+            if (mechanic.name.StartsWith(SpecialNames.FuelGroupRecipe, StringComparison.Ordinal)) {
+                // Keep custom fuel-group recipe names/descriptions (e.g. "Chemical Fuel from Coal").
+                continue;
+            }
+
             mechanic.locName = mechanic.localizationKey.Localize(mechanic.source.locName, mechanic.products.FirstOrDefault()?.goods.fluid?.temperature!);
             mechanic.locDescr = mechanic.source.locDescr;
             mechanic.iconSpec = mechanic.source.iconSpec;
@@ -778,6 +788,286 @@ internal partial class FactorioDataDeserializer {
         recipeCategories.Add(category, recipe);
 
         return recipe;
+    }
+
+    /// <summary>
+    /// Creates a synthetic fuel group item representing a fuel category.
+    /// </summary>
+    private Item CreateFuelGroupItem(string categoryKey, IReadOnlyList<Goods> fuelsInCategory) {
+        string itemName = SpecialNames.FuelGroup + categoryKey;
+        
+        if (registeredObjects.TryGetValue((typeof(Item), itemName), out var itemRaw)) {
+            return (Item)itemRaw;
+        }
+
+        // Create the item directly (it doesn't exist in raw Factorio data)
+        var item = new Item {
+            name = itemName,
+            factorioType = "item",
+            stackSize = 1,
+            showInExplorers = true,
+            locName = GenerateFuelGroupName(categoryKey, fuelsInCategory),
+            locDescr = GenerateFuelGroupDescription(categoryKey, fuelsInCategory),
+            // Nominal fuel value of 1 MJ so cost analysis treats 1 group item = 1 MJ
+            fuelValue = 1f,
+        };
+
+        // Copy icon from first fuel in the group
+        if (fuelsInCategory.Count > 0) {
+            item.iconSpec = fuelsInCategory[0].iconSpec;
+        }
+
+        allObjects.Add(item);
+        registeredObjects[(typeof(Item), itemName)] = item;
+        
+        return item;
+    }
+
+    /// <summary>
+    /// Generates a localized name for a fuel group.
+    /// </summary>
+    private string GenerateFuelGroupName(string categoryKey, IReadOnlyList<Goods> fuelsInCategory) {
+        // Handle special categories
+        if (categoryKey == SpecialNames.BurnableFluid.TrimEnd('.')) {
+            return "Burnable Fluid";
+        }
+        if (categoryKey == SpecialNames.HotFluid.TrimEnd('.')) {
+            return "Hot Fluid";
+        }
+        if (categoryKey.StartsWith(SpecialNames.SpecificFluid)) {
+            string fluidName = categoryKey.Substring(SpecialNames.SpecificFluid.Length);
+            return fuelsInCategory.Count > 0 ? fuelsInCategory[0].locName : fluidName;
+        }
+
+        // For regular burner categories, format name nicely
+        // "chemical" -> "Chemical Fuel", "nuclear" -> "Nuclear Fuel"
+        string baseName = categoryKey;
+        if (baseName.Contains('-')) {
+            var parts = baseName.Split('-');
+            baseName = string.Join(" ", parts.Select(p => char.ToUpper(p[0]) + p.Substring(1)));
+        } else {
+            baseName = char.ToUpper(baseName[0]) + baseName.Substring(1);
+        }
+
+        return baseName + " Fuel";
+    }
+
+    /// <summary>
+    /// Generates a localized description for a fuel group listing the contained fuels.
+    /// </summary>
+    private string GenerateFuelGroupDescription(string categoryKey, IReadOnlyList<Goods> fuelsInCategory) {
+        if (fuelsInCategory.Count == 0) {
+            return "Fuel group (no fuels available)";
+        }
+
+        if (fuelsInCategory.Count == 1) {
+            return $"Represents {fuelsInCategory[0].locName} fuel";
+        }
+
+        var fuelNames = string.Join(", ", fuelsInCategory.Take(5).Select(f => f.locName));
+        if (fuelsInCategory.Count > 5) {
+            fuelNames += $", and {fuelsInCategory.Count - 5} more";
+        }
+        return $"Fuel group containing: {fuelNames}";
+    }
+
+    /// <summary>
+    /// Creates fuel group items and recipes for all fuel categories used by entities.
+    /// Replaces entity.energy.fuels with the corresponding fuel group items.
+    /// </summary>
+    private void CreateFuelGroups(DataBucket<Entity, string> fuelUsers, DataBucket<RecipeOrTechnology, EntityCrafter> actualRecipeCrafters,
+        DataBucket<Goods, Recipe> itemUsages, DataBucket<Goods, Recipe> itemProduction, List<Recipe> allRecipes, List<Mechanics> allMechanics) {
+        // Collect all used fuel categories
+        var usedFuelCategories = new Dictionary<string, List<Goods>>();
+
+        static bool IsExcludedFromFuelGroups(Goods fuel)
+            => fuel is Fluid fluid && fluid.originalName == "steam"
+                || fuel is Special special && (special.name == SpecialNames.Heat || special.name.StartsWith(SpecialNames.Heat + "@", StringComparison.Ordinal));
+
+        var allEntities = allObjects.OfType<Entity>().ToArray();
+
+        foreach (var o in allEntities) {
+            if (o.energy == null || o.energy == voidEntityEnergy) {
+                continue;
+            }
+
+            foreach (var categoryKey in fuelUsers.GetRaw(o)) {
+                if (!usedFuelCategories.ContainsKey(categoryKey)) {
+                    usedFuelCategories[categoryKey] = fuels.GetRaw(categoryKey).Where(f => !IsExcludedFromFuelGroups(f)).ToList();
+                }
+            }
+        }
+
+        // Create a single shared crafter entity for all fuel group conversion recipes.
+        // We create it lazily so it only appears when there is at least one fuel group.
+        EntityCrafter? fuelGroupCrafter = null;
+
+        EntityCrafter GetOrCreateFuelGroupCrafter() {
+            if (fuelGroupCrafter != null) {
+                return fuelGroupCrafter;
+            }
+
+            fuelGroupCrafter = new EntityCrafter {
+                name = "fuel-group-crafter",
+                locName = "Fuel Sorting",
+                locDescr = "Virtual process that represents sorting/grouping fuels by their energy category.",
+                factorioType = SpecialNames.FakeRecipe,
+                iconSpec = [new FactorioIconPart("__core__/graphics/icons/alerts/no-fuel-icon.png")],
+                energy = voidEntityEnergy,
+                baseCraftingSpeed = 1f,
+                itemInputs = 1,
+                effectReceiver = new EffectReceiver {
+                    baseEffect = new Effect(),
+                    usesModuleEffects = false,
+                    usesBeaconEffects = false,
+                    usesSurfaceEffects = false,
+                },
+            };
+            allObjects.Add(fuelGroupCrafter);
+            registeredObjects[(typeof(Entity), "fuel-group-crafter")] = fuelGroupCrafter;
+            rootAccessible.Add(fuelGroupCrafter);
+            recipeCrafters.Add(fuelGroupCrafter, SpecialNames.FuelGroup);
+            return fuelGroupCrafter;
+        }
+
+        // Create/reuse fuel group items and recipes. Keys can be category ids or subset ids.
+        var categoryItemMap = new Dictionary<string, Item>();
+        List<RecipeOrTechnology> fuelGroupRecipes = [];
+
+        Item EnsureFuelGroup(string groupKey, string displayCategoryKey, IReadOnlyList<Goods> fuelsInCategory) {
+            if (categoryItemMap.TryGetValue(groupKey, out var existingGroup)) {
+                return existingGroup;
+            }
+
+            var groupItem = CreateFuelGroupItem(groupKey, fuelsInCategory);
+            // Keep naming based on the original category key so subset groups still read naturally.
+            groupItem.locName = GenerateFuelGroupName(displayCategoryKey, fuelsInCategory);
+            groupItem.locDescr = GenerateFuelGroupDescription(displayCategoryKey, fuelsInCategory);
+            categoryItemMap[groupKey] = groupItem;
+
+            _ = GetOrCreateFuelGroupCrafter();
+
+            foreach (var fuel in fuelsInCategory) {
+                var recipeName = SpecialNames.FuelGroupRecipe + groupItem.name + "." + fuel.name;
+
+                if (registeredObjects.ContainsKey((typeof(Mechanics), recipeName))) {
+                    continue;
+                }
+
+                float ingredientAmount, productAmount;
+                if (fuel.fuelValue >= groupItem.fuelValue) {
+                    ingredientAmount = 1f;
+                    productAmount = fuel.fuelValue > 0f ? fuel.fuelValue / groupItem.fuelValue : 1f;
+                }
+                else {
+                    ingredientAmount = fuel.fuelValue > 0f ? groupItem.fuelValue / fuel.fuelValue : 1f;
+                    productAmount = 1f;
+                }
+
+                var recipe = new Mechanics {
+                    name = recipeName,
+                    time = 1f,
+                    factorioType = SpecialNames.FakeRecipe,
+                    ingredients = [new Ingredient(fuel, ingredientAmount)],
+                    products = [new Product(groupItem, productAmount)],
+                    mainProduct = groupItem,
+                    locName = $"{groupItem.locName} from {fuel.locName}",
+                    locDescr = $"Convert {fuel.locName} into {groupItem.locName}.",
+                    iconSpec = groupItem.iconSpec,
+                    enabled = true,
+                    hidden = false,
+                    technologyUnlock = [],
+                    source = fuel,
+                    localizationKey = LSs.LocalizationFallbackDescriptionRecipeToCreate,
+                };
+
+                recipeCategories.Add(SpecialNames.FuelGroup, recipe);
+                allObjects.Add(recipe);
+                registeredObjects[(typeof(Mechanics), recipeName)] = recipe;
+                if (fuelGroupCrafter != null) {
+                    actualRecipeCrafters.Add(recipe, fuelGroupCrafter, true);
+                }
+                allRecipes.Add(recipe);
+                allMechanics.Add(recipe);
+
+                foreach (var ingredient in recipe.ingredients) {
+                    itemUsages.Add(ingredient.goods, recipe);
+                }
+                foreach (var product in recipe.products) {
+                    itemProduction.Add(product.goods, recipe);
+                }
+
+                fuelGroupRecipes.Add(recipe);
+            }
+
+            return groupItem;
+        }
+
+        // Build the baseline category groups first (initial behavior that worked well).
+        foreach (var (categoryKey, fuelsInCategory) in usedFuelCategories) {
+            if (categoryKey == SpecialNames.Electricity || categoryKey == SpecialNames.Heat || categoryKey == SpecialNames.Void) {
+                continue;
+            }
+
+            if (fuelsInCategory.Count <= 1) {
+                continue;
+            }
+
+            _ = EnsureFuelGroup(categoryKey, categoryKey, fuelsInCategory);
+        }
+
+        if (fuelGroupCrafter != null) {
+            fuelGroupCrafter.recipes = [.. fuelGroupRecipes];
+        }
+
+        // Replace entity fuels with group items.
+        // Rule: if a building accepts only one fuel in the relevant category/subset, do not touch it.
+        // If it accepts a subset (>1), create/reuse a subset group and use it.
+        foreach (var o in allEntities) {
+            if (o.energy == null || o.energy == voidEntityEnergy || o.energy.fuels.Length == 0) {
+                continue;
+            }
+
+            HashSet<Goods> originalFuels = [.. o.energy.fuels];
+            HashSet<Goods> remainingFuels = [.. originalFuels];
+            HashSet<Goods> groupedReplacements = [];
+
+            foreach (var categoryKey in fuelUsers.GetRaw(o)) {
+                if (categoryKey == SpecialNames.Electricity || categoryKey == SpecialNames.Heat || categoryKey == SpecialNames.Void) {
+                    continue;
+                }
+
+                if (!usedFuelCategories.TryGetValue(categoryKey, out var categoryFuelList) || categoryFuelList.Count <= 1) {
+                    continue;
+                }
+
+                List<Goods> acceptedSubset = [.. categoryFuelList.Where(originalFuels.Contains).OrderBy(f => f.typeDotName, StringComparer.Ordinal)];
+
+                // Only one accepted fuel in this category/subset: keep building unchanged for this category.
+                if (acceptedSubset.Count <= 1) {
+                    continue;
+                }
+
+                bool isFullCategory = acceptedSubset.Count == categoryFuelList.Count && acceptedSubset.SequenceEqual(categoryFuelList);
+                string groupKey = isFullCategory
+                    ? categoryKey
+                    : categoryKey + "|subset|" + string.Join("|", acceptedSubset.Select(f => f.typeDotName));
+
+                var groupItem = EnsureFuelGroup(groupKey, categoryKey, acceptedSubset);
+                groupedReplacements.Add(groupItem);
+
+                foreach (Goods fuel in acceptedSubset) {
+                    _ = remainingFuels.Remove(fuel);
+                }
+            }
+
+            if (groupedReplacements.Count > 0) {
+                foreach (Goods group in groupedReplacements) {
+                    _ = remainingFuels.Add(group);
+                }
+                o.energy.fuels = [.. remainingFuels.OrderBy(f => f.typeDotName, StringComparer.Ordinal)];
+            }
+        }
     }
 
     /// <summary>

@@ -128,6 +128,11 @@ public static partial class DataUtils {
     /// but will appear as only producing U-235 and consuming U-238 when <see langword="true"/>.
     /// </summary>
     public static bool netProduction { get; internal set; }
+
+    /// <summary>
+    /// If <see langword="true"/>, YAFC will create synthetic fuel groups and conversion recipes for fuel categories.
+    /// </summary>
+    public static bool useFuelGroups { get; internal set; }
     public static Icon NoFuelIcon { get; internal set; }
     public static Icon WarningIcon { get; internal set; }
     public static Icon HandIcon { get; internal set; }

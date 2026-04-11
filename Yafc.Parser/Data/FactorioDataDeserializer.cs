@@ -203,13 +203,14 @@ internal partial class FactorioDataDeserializer {
     /// If <see langword="false"/>, recipe selection windows will show all recipes that produce or consume any quantity of that <see cref="Goods"/>.<br/>
     /// For example, Kovarex enrichment will appear for both production and consumption of both U-235 and U-238 when <see langword="false"/>,
     /// but will appear as only producing U-235 and consuming U-238 when <see langword="true"/>.</param>
+    /// <param name="useFuelGroups">If <see langword="true"/>, YAFC will create synthetic fuel groups and conversion recipes for fuel categories.</param>
     /// <param name="progress">An <see cref="IProgress{T}"/> that receives two strings describing the current loading state.</param>
     /// <param name="errorCollector">An <see cref="ErrorCollector"/> that will collect the errors and warnings encountered while loading and processing the file and data.</param>
     /// <param name="renderIcons">If <see langword="true"/>, Yafc will render the icons necessary for UI display.</param>
     /// <param name="useLatestSave">If <see langword="true"/>, Yafc will try to find the most recent autosave.</param>
     /// <returns>A <see cref="Project"/> containing the information loaded from <paramref name="projectPath"/>. Also sets the <see langword="static"/> properties
     /// in <see cref="Database"/>.</returns>
-    public Project LoadData(string projectPath, LuaTable data, LuaTable prototypes, bool netProduction,
+    public Project LoadData(string projectPath, LuaTable data, LuaTable prototypes, bool netProduction, bool useFuelGroups,
         IProgress<(string, string)> progress, ErrorCollector errorCollector, bool renderIcons, bool useLatestSave) {
 
         progress.Report((LSs.ProgressLoading, LSs.ProgressLoadingItems));
@@ -265,7 +266,12 @@ internal partial class FactorioDataDeserializer {
         UpdateSplitFluids();
         UpdateSplitHeats();
         UpdateRecipeIngredientFluids(errorCollector);
-        CalculateMaps(netProduction);
+        CalculateMaps(netProduction, useFuelGroups);
+        // CalculateMaps may add new synthetic objects (e.g. fuel groups). Re-sort and re-assign IDs.
+        allObjects.Sort((a, b) => a.sortingOrder == b.sortingOrder ? string.Compare(a.typeDotName, b.typeDotName, StringComparison.Ordinal) : a.sortingOrder - b.sortingOrder);
+        for (int i = 0; i < allObjects.Count; i++) {
+            allObjects[i].id = (FactorioId)i;
+        }
         var iconRenderTask = renderIcons ? Task.Run(RenderIcons) : Task.CompletedTask;
         UpdateRecipeCatalysts();
         CalculateItemWeights();

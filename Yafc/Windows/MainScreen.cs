@@ -648,7 +648,7 @@ public partial class MainScreen : WindowMain, IKeyboardFocus, IProgress<(string,
             FilesystemScreen.Mode.SelectOrCreateFile, LSs.DefaultFileName, this, null, "yafc", "Enter Project Name");
         if (projectPath != null) {
             project.Save(projectPath);
-            Preferences.Instance.AddProject(DataUtils.dataPath, DataUtils.modsPath, projectPath, DataUtils.expensiveRecipes, DataUtils.netProduction);
+            Preferences.Instance.AddProject(DataUtils.dataPath, DataUtils.modsPath, projectPath, DataUtils.expensiveRecipes, DataUtils.netProduction, DataUtils.useFuelGroups);
             return true;
         }
 

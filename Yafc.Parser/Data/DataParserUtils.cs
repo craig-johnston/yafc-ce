@@ -134,4 +134,6 @@ public static class SpecialNames {
     public const string SpoilRecipe = "spoil";
     public const string PlantRecipe = "plant";
     public const string AsteroidCapture = "asteroid-capture";
+    public const string FuelGroup = "fuel-group.";
+    public const string FuelGroupRecipe = "fuel-group-recipe.";
 }

@@ -795,6 +795,75 @@ public sealed class RecipeRow : ModelObject<ProductionTable>, IGroupedElement<Pr
         }
     }
 
+    /// <summary>
+    /// Apply a default flood-fill module when this row uses a single-category module building and no template was selected.
+    /// The chosen module matches the recipe unlock step when possible, with a fallback to the closest earlier unlock.
+    /// </summary>
+    public void AutoApplySingleCategorySpeedModule() {
+        if (modules != null || recipe is null || entity is null || entity.target.moduleSlots <= 0) {
+            return;
+        }
+
+        if (recipe.target is not Recipe selectedRecipe) {
+            return;
+        }
+
+        if (entity.target.allowedModuleCategories is not [string moduleCategory]) {
+            return;
+        }
+
+        Bits recipeUnlockOrder = DataUtils.GetMilestoneOrder(selectedRecipe.id);
+
+        IObjectWithQuality<Module>? bestExactModule = null;
+        float bestExactSpeed = 0f;
+
+        IObjectWithQuality<Module>? bestEarlierModule = null;
+        float bestEarlierSpeed = 0f;
+        Bits bestEarlierUnlockOrder = default;
+        bool hasEarlierModule = false;
+
+        foreach (Module module in Database.allModules) {
+            if (!string.Equals(module.moduleSpecification.category, moduleCategory, StringComparison.Ordinal)) {
+                continue;
+            }
+
+            if (!entity.target.CanAcceptModule(module.moduleSpecification) || !recipe.target.CanAcceptModule(module)) {
+                continue;
+            }
+
+            Bits moduleUnlockOrder = DataUtils.GetMilestoneOrder(module.id);
+            int unlockCompare = moduleUnlockOrder.CompareTo(recipeUnlockOrder);
+            if (unlockCompare > 0) {
+                continue;
+            }
+
+            float speed = module.moduleSpecification.Speed(Quality.Normal);
+            if (moduleUnlockOrder == recipeUnlockOrder) {
+                if (speed > bestExactSpeed) {
+                    bestExactModule = module.With(Quality.Normal);
+                    bestExactSpeed = speed;
+                }
+                continue;
+            }
+
+            if (!hasEarlierModule || moduleUnlockOrder.CompareTo(bestEarlierUnlockOrder) > 0
+                || (moduleUnlockOrder == bestEarlierUnlockOrder && speed > bestEarlierSpeed)) {
+                bestEarlierModule = module.With(Quality.Normal);
+                bestEarlierSpeed = speed;
+                bestEarlierUnlockOrder = moduleUnlockOrder;
+                hasEarlierModule = true;
+            }
+        }
+
+        IObjectWithQuality<Module>? bestModule = bestExactModule ?? bestEarlierModule;
+
+        if (bestModule != null) {
+            modules = new ModuleTemplateBuilder {
+                list = [(bestModule, 0)]
+            }.Build(this);
+        }
+    }
+
     public float DetermineFlow(IObjectWithQuality<Goods> goods) {
         if (recipe is null) {
             throw new InvalidOperationException("Cannot determine flow when no recipe is selected.");
@@ -897,7 +966,10 @@ public class ProductionLink(ProductionTable group, IObjectWithQuality<Goods> goo
         HasProductionAndConsumption = HasProduction | HasConsumption,
     }
 
-    public IObjectWithQuality<Goods> goods { get; } = goods ?? throw new ArgumentNullException(nameof(goods), LSs.LoadErrorLinkedProductDoesNotExist);
+    public IObjectWithQuality<Goods> goods { get; } = goods
+        ?? (SerializationMap.IsDeserializing
+            ? Database.voidEnergy
+            : throw new ArgumentNullException(nameof(goods), LSs.LoadErrorLinkedProductDoesNotExist));
     public float amount { get; set; }
     public LinkAlgorithm algorithm { get; set; }
     public UnitOfMeasure flowUnitOfMeasure => goods.target.flowUnitOfMeasure;
